@@ -551,7 +551,6 @@ func convertToolInfos(reqTools []openai.Tool) ([]*schema.ToolInfo, error) {
 		// 处理参数属性
 		for key, val := range propertiesMap {
 			propMap, ok := val.(map[string]interface{})
-			fmt.Printf("propMap:%+v\n", propMap)
 			if !ok {
 				return nil, fmt.Errorf("属性 %s 格式不正确", key)
 			}
