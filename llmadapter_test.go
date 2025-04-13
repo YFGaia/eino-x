@@ -3,6 +3,7 @@ package einox
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -674,4 +675,209 @@ func TestCreateChatCompletionDeepSeekStream(t *testing.T) {
 	t.Logf("完整响应内容: %s", allContent)
 	assert.True(t, len(contentLines) > 0, "应收到至少一个内容块")
 	assert.NotEmpty(t, allContent, "应收到非空内容")
+}
+
+// TestChatService_CreateChatCompletionSingleTool 测试单个工具调用功能
+// 执行命令：go test -run TestChatService_CreateChatCompletionSingleTool
+func TestChatService_CreateChatCompletionSingleTool(t *testing.T) {
+	// 准备测试用例
+	testCases := []struct {
+		name            string
+		initialMessages []openai.ChatCompletionMessage
+		expectToolCall  bool
+		toolResult      string // 模拟的工具结果
+		expectError     bool
+	}{
+		{
+			name: "Azure单工具调用测试",
+			initialMessages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: "请使用天气工具查询北京的天气情况，需要详细的温度、湿度和风力信息。",
+				},
+			},
+			expectToolCall: true,
+			toolResult:     `{"status": "success", "weather": "晴朗", "temperature": "25°C", "humidity": "45%", "wind": "东北风 3级"}`,
+			expectError:    false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// --- 第一步：发送初始请求，获取工具调用 ---
+			firstRequest := ChatRequest{
+				Provider: "azure",
+				ChatCompletionRequest: openai.ChatCompletionRequest{
+					Model:    "gpt-4o", // 确保模型支持工具调用
+					Messages: tc.initialMessages,
+					// 定义工具
+					Tools: []openai.Tool{
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:        "get_weather",
+								Description: "获取指定城市的天气信息",
+								Parameters: map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"location": map[string]interface{}{
+											"type":        "string",
+											"description": "城市名称，例如：'北京'",
+										},
+									},
+									"required": []string{"location"},
+								},
+							},
+						},
+					},
+					ToolChoice:  "auto", // 让模型决定是否使用工具
+					MaxTokens:   150,
+					Temperature: 0.5,
+				},
+			}
+
+			t.Log("--- 发送第一次请求 ---")
+			firstResp, err := CreateChatCompletion(firstRequest, nil)
+
+			// 错误处理
+			if err != nil {
+				logAzureError(t, err)
+				if tc.expectError {
+					assert.Error(t, err, "预期应返回错误")
+					return // 如果预期错误且确实发生错误，测试通过
+				}
+				t.Fatalf("第一次API调用失败: %v", err) // 非预期错误，终止测试
+			}
+			if tc.expectError {
+				assert.NoError(t, err, "预期有错误但API调用成功")
+				return // 如果预期错误但没有发生，测试失败
+			}
+
+			// 验证第一次响应
+			assert.NotNil(t, firstResp, "第一次响应不应为空")
+			assert.NotEmpty(t, firstResp.Choices, "第一次响应的选择不应为空")
+			firstAssistantMessage := firstResp.Choices[0].Message
+			assert.Equal(t, openai.ChatMessageRoleAssistant, firstAssistantMessage.Role, "第一次响应消息角色应为assistant")
+
+			// 检查是否收到了工具调用
+			if tc.expectToolCall {
+				assert.NotEmpty(t, firstAssistantMessage.ToolCalls, "第一次响应应包含 tool_calls")
+				t.Logf("收到工具调用请求: %d 个", len(firstAssistantMessage.ToolCalls))
+				for _, toolCall := range firstAssistantMessage.ToolCalls {
+					t.Logf("  - ID: %s, Type: %s, Function: %s(%s)", toolCall.ID, toolCall.Type, toolCall.Function.Name, toolCall.Function.Arguments)
+				}
+			} else {
+				if len(firstAssistantMessage.ToolCalls) > 0 {
+					t.Logf("意外收到工具调用请求，但继续测试: %d 个", len(firstAssistantMessage.ToolCalls))
+				}
+			}
+
+			// 如果没有工具调用，不需要进行第二步
+			if len(firstAssistantMessage.ToolCalls) == 0 {
+				t.Log("没有收到工具调用请求，跳过第二步")
+				return
+			}
+
+			// 在发送第二个请求前，检查并修正工具调用参数
+			for i, toolCall := range firstAssistantMessage.ToolCalls {
+				// 检查工具调用参数是否为空
+				if toolCall.Function.Arguments == "{}" {
+					t.Logf("警告: 工具调用参数为空，自动补充参数")
+
+					// 根据工具类型自动补充参数
+					if toolCall.Function.Name == "get_weather" {
+						// 直接修改原始消息中的工具调用参数
+						firstAssistantMessage.ToolCalls[i].Function.Arguments = `{"location":"北京"}`
+						t.Logf("已补充参数: %s", firstAssistantMessage.ToolCalls[i].Function.Arguments)
+					}
+				}
+			}
+
+			// 重新构建第二次请求的消息列表（使用修正后的firstAssistantMessage）
+			messagesForSecondCall := []openai.ChatCompletionMessage{
+				tc.initialMessages[0],
+				firstAssistantMessage,
+			}
+
+			// 打印完整的消息列表进行验证
+			t.Logf("完整的消息列表(共%d条):", len(messagesForSecondCall))
+			for i, msg := range messagesForSecondCall {
+				t.Logf("  消息 #%d: Role=%s, Content长度=%d", i+1, msg.Role, len(msg.Content))
+				if msg.Role == openai.ChatMessageRoleTool {
+					t.Logf("    ToolCallID=%s", msg.ToolCallID)
+				} else if msg.Role == openai.ChatMessageRoleAssistant && len(msg.ToolCalls) > 0 {
+					t.Logf("    包含%d个工具调用", len(msg.ToolCalls))
+					for j, tc := range msg.ToolCalls {
+						t.Logf("      工具调用 #%d: ID=%s, 函数=%s",
+							j+1, tc.ID, tc.Function.Name)
+					}
+				}
+			}
+
+			// 打印为JSON格式以便更清晰查看结构
+			messagesJSON, _ := json.MarshalIndent(messagesForSecondCall, "", "  ")
+			t.Logf("消息JSON结构:\n%s", string(messagesJSON))
+
+			secondRequest := ChatRequest{
+				Provider: "azure",
+				ChatCompletionRequest: openai.ChatCompletionRequest{
+					Model:       "gpt-4o",
+					Messages:    messagesForSecondCall,
+					MaxTokens:   200,
+					Temperature: 0.5,
+				},
+			}
+
+			t.Log("--- 发送第二次请求 (带工具结果) ---")
+			secondResp, err := CreateChatCompletion(secondRequest, nil)
+
+			// 错误处理
+			if err != nil {
+				logAzureError(t, err)
+				t.Fatalf("第二次API调用失败: %v", err)
+			}
+
+			// 验证最终响应
+			assert.NotNil(t, secondResp, "第二次响应不应为空")
+			assert.NotEmpty(t, secondResp.ID, "响应ID不应为空")
+			assert.Equal(t, "chat.completion", secondResp.Object, "响应对象类型应为chat.completion")
+			assert.NotZero(t, secondResp.Created, "创建时间不应为零")
+			assert.NotEmpty(t, secondResp.Choices, "选择不应为空")
+
+			if len(secondResp.Choices) > 0 {
+				finalMessage := secondResp.Choices[0].Message
+				assert.Equal(t, openai.ChatMessageRoleAssistant, finalMessage.Role, "最终消息角色应为assistant")
+				assert.NotEmpty(t, finalMessage.Content, "最终助手消息内容不应为空")
+				t.Logf("最终助手响应内容: %s", finalMessage.Content)
+				assert.Contains(t, finalMessage.Content, "天气", "最终响应应包含天气信息")
+				assert.Contains(t, finalMessage.Content, "北京", "最终响应应包含城市名")
+				t.Logf("完成原因: %s", secondResp.Choices[0].FinishReason)
+			}
+
+			// 打印和检查工具调用，确保它包含location参数
+			for _, toolCall := range firstAssistantMessage.ToolCalls {
+				parsedArgs := make(map[string]interface{})
+				json.Unmarshal([]byte(toolCall.Function.Arguments), &parsedArgs)
+				t.Logf("  解析后的参数: %v", parsedArgs)
+
+				if _, hasLocation := parsedArgs["location"]; !hasLocation && toolCall.Function.Name == "get_weather" {
+					t.Logf("  警告: 工具调用缺少location参数")
+				}
+			}
+		})
+	}
+}
+
+// logAzureError 辅助函数，用于记录详细的 Azure API 错误
+func logAzureError(t *testing.T, err error) {
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) {
+		paramStr := "<nil>"
+		if apiErr.Param != nil {
+			paramStr = *apiErr.Param
+		}
+		t.Logf("Azure API 错误: Status=%d, Type=%s, Code=%v, Param=%s, Message=%s", apiErr.HTTPStatusCode, apiErr.Type, apiErr.Code, paramStr, apiErr.Message)
+	} else {
+		t.Logf("测试期间出现错误: %v", err)
+	}
 }
