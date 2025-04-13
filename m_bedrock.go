@@ -11,13 +11,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/sashabaranov/go-openai"
-
-	"encoding/base64"
 
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino/schema"
@@ -596,44 +593,4 @@ func convertToolInfos(reqTools []openai.Tool) ([]*schema.ToolInfo, error) {
 	}
 
 	return tools, nil
-}
-
-// convertImageURLToBase64 将图片URL转换为BASE64编码
-func convertImageURLToBase64(imageURL string) (string, string, error) {
-	// 创建HTTP请求
-	client := http.DefaultClient
-	resp, err := client.Get(imageURL)
-	if err != nil {
-		return "", "", fmt.Errorf("下载图片失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查响应状态码
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("下载图片失败，状态码: %d", resp.StatusCode)
-	}
-
-	// 获取MIME类型
-	mimeType := resp.Header.Get("Content-Type")
-	if mimeType == "" {
-		// 如果响应头没有指定MIME类型，则根据URL推测
-		mimeType = detectMIMEType(imageURL)
-	}
-
-	// 读取图片数据
-	imageData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("读取图片数据失败: %v", err)
-	}
-
-	// 转换为BASE64
-	base64Data := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(imageData))
-
-	return base64Data, mimeType, nil
-}
-
-// isURL 判断字符串是否是URL
-func isURL(str string) bool {
-	// 简单的URL判断逻辑
-	return strings.HasPrefix(str, "http://") || strings.HasPrefix(str, "https://")
 }

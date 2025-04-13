@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/sashabaranov/go-openai" // 确保导入 go-openai 包
 )
 
 // convertChatRequestToSchemaMessages 将ChatRequest中的消息转换为schema.Message格式
@@ -15,7 +16,9 @@ func convertChatRequestToSchemaMessages(req ChatRequest) []*schema.Message {
 		schemaMsg := &schema.Message{
 			Role:       schema.RoleType(msg.Role),
 			Name:       msg.Name,
-			ToolCallID: msg.ToolCallID,
+			ToolCallID: msg.ToolCallID, // 主要用于 'tool' 角色的消息
+			//TODO 待完善
+			//ToolCalls: convertToolCalls(msg.ToolCalls),
 		}
 
 		// 处理内容 - 根据是否有多模态内容决定使用Content还是MultiContent
@@ -38,11 +41,16 @@ func convertChatRequestToSchemaMessages(req ChatRequest) []*schema.Message {
 							// 转换图片URL为BASE64
 							base64Data, mimeType, err := convertImageURLToBase64(part.ImageURL.URL)
 							if err != nil {
-								// 记录错误但继续使用原URL
+								// 记录错误但继续使用原URL结构
 								fmt.Printf("转换图片URL到BASE64失败: %v\n", err)
+								// 保留原始 ImageURL 结构（如果转换失败）
+								chatPart.ImageURL = &schema.ChatMessageImageURL{
+									URL:    part.ImageURL.URL,
+									Detail: schema.ImageURLDetail(part.ImageURL.Detail),
+									// MIMEType 可能未知
+								}
 							} else {
 								// 使用转换后的BASE64数据
-								part.ImageURL.URL = base64Data
 								chatPart.ImageURL = &schema.ChatMessageImageURL{
 									URL:      base64Data,
 									Detail:   schema.ImageURLDetail(part.ImageURL.Detail),
@@ -60,8 +68,6 @@ func convertChatRequestToSchemaMessages(req ChatRequest) []*schema.Message {
 					}
 				case schema.ChatMessagePartTypeAudioURL:
 					// 处理音频URL (如果API支持)
-					// 注意：目前go-openai未定义AudioURL等字段
-					// 未来API支持后需要更新此处实现
 					if part.ImageURL != nil { // 临时使用ImageURL字段
 						chatPart.AudioURL = &schema.ChatMessageAudioURL{
 							URL:      part.ImageURL.URL,
@@ -82,8 +88,7 @@ func convertChatRequestToSchemaMessages(req ChatRequest) []*schema.Message {
 						chatPart.FileURL = &schema.ChatMessageFileURL{
 							URL:      part.ImageURL.URL,
 							MIMEType: "application/pdf", // 默认MIME类型
-							//TODO 待完善
-							Name: "file.pdf", // 默认文件名
+							Name:     "file.pdf",        // 默认文件名 TODO 待完善
 						}
 					}
 				}
@@ -96,7 +101,33 @@ func convertChatRequestToSchemaMessages(req ChatRequest) []*schema.Message {
 			schemaMsg.Content = msg.Content
 		}
 
-		// 如果存在额外数据，添加到Extra字段 TODO 待完善
+		// --- 处理 Assistant 的 ToolCalls ---
+		if msg.Role == openai.ChatMessageRoleAssistant && len(msg.ToolCalls) > 0 {
+			schemaToolCalls := make([]schema.ToolCall, 0, len(msg.ToolCalls)) // 初始化为空切片
+			for _, tc := range msg.ToolCalls {
+				// 仅转换 function 类型的 tool call
+				if tc.Type == openai.ToolTypeFunction {
+					schemaToolCalls = append(schemaToolCalls, schema.ToolCall{
+						ID:   tc.ID,
+						Type: string(tc.Type), // 转换为 "function" 字符串
+						Function: schema.FunctionCall{
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
+						},
+						// Index 字段通常在非流式请求的转换中不需要设置
+					})
+				} else {
+					fmt.Printf("[DEBUG-UTILS] 警告: 跳过非 function 类型的工具调用: Type=%s, ID=%s\n", tc.Type, tc.ID)
+				}
+			}
+			// 只有当确实转换了 tool call 时才赋值
+			if len(schemaToolCalls) > 0 {
+				schemaMsg.ToolCalls = schemaToolCalls
+			}
+		}
+		// --- 结束处理 ToolCalls ---
+
+		// 如果存在额外数据，添加到Extra字段
 		if req.Extra != nil && len(req.Extra) > 0 {
 			schemaMsg.Extra = req.Extra
 		}
@@ -106,6 +137,19 @@ func convertChatRequestToSchemaMessages(req ChatRequest) []*schema.Message {
 	}
 
 	return schemaMessages
+}
+
+// isURL (需要实现或确保存在) - 简单实现
+func isURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// convertImageURLToBase64 (需要实现或确保存在) - 占位符实现
+// 在实际场景中，这里需要获取URL内容、编码为Base64并检测MIME类型
+func convertImageURLToBase64(url string) (string, string, error) {
+	fmt.Printf("[DEBUG-UTILS] 占位符: 需要实现将 URL %s 转换为 base64\n", url)
+	// 暂时返回错误以模拟原始逻辑流程（打印错误但不中断）
+	return "", "", fmt.Errorf("convertImageURLToBase64 未实现")
 }
 
 // detectMIMEType 根据URL或数据检测MIME类型

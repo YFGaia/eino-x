@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -152,10 +153,11 @@ func (c *Config) getAzureConfig() (*einoopenai.ChatModelConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化RSA密钥管理器失败: %v", err)
 	}
-	selectedCred.ApiKey, err = decryptFunc1(selectedCred.ApiKey)
+	decryptedApiKey, err := decryptFunc1(selectedCred.ApiKey)
 	if err != nil {
 		return nil, fmt.Errorf("解密失败: %v", err)
 	}
+	selectedCred.ApiKey = decryptedApiKey // 更新为解密后的 key
 
 	nConf := &einoopenai.ChatModelConfig{
 		ByAzure:     true,
@@ -180,11 +182,11 @@ func (c *Config) getAzureConfig() (*einoopenai.ChatModelConfig, error) {
 }
 
 // convertOpenAIToolsToSchemaTools 将 openai.Tool 转换为 schema.ToolInfo
-// 注意: 这是一个最小化实现，仅设置基本字段
 func convertOpenAIToolsToSchemaTools(tools []openai.Tool) ([]*schema.ToolInfo, error) {
 	if tools == nil {
 		return nil, nil
 	}
+
 	schemaTools := make([]*schema.ToolInfo, 0, len(tools))
 	for _, tool := range tools {
 		if tool.Type != openai.ToolTypeFunction || tool.Function == nil {
@@ -195,10 +197,10 @@ func convertOpenAIToolsToSchemaTools(tools []openai.Tool) ([]*schema.ToolInfo, e
 		schemaTool := &schema.ToolInfo{
 			Name: tool.Function.Name,
 			Desc: tool.Function.Description,
+			// 转换参数定义 (这部分需要根据实际情况实现或假设 einoopenai 会处理)
+			// Assuming parameters are handled downstream or this is sufficient for now
+			// ParamsOneOf: ???
 		}
-
-		// 打印结构体帮助调试
-		fmt.Printf("Debug - Adding tool: %s\n", tool.Function.Name)
 
 		schemaTools = append(schemaTools, schemaTool)
 	}
@@ -213,13 +215,10 @@ func convertSchemaToolCallsToOpenAI(schemaCalls []schema.ToolCall) []openai.Tool
 
 	openAICalls := make([]openai.ToolCall, 0, len(schemaCalls))
 	for _, sc := range schemaCalls {
-		// 打印结构体帮助调试
-		fmt.Printf("Debug - Tool call ID: %s, Type: %s\n", sc.ID, sc.Type)
-
 		// 默认使用 function 类型，Eino 中默认也是 "function"
 		toolType := openai.ToolTypeFunction
 		if sc.Type != "function" {
-			fmt.Printf("警告: 未知的工具类型 '%s'，默认使用 'function'\n", sc.Type)
+			fmt.Printf("Warning: Unknown tool type '%s' for ToolCall ID %s, defaulting to 'function'\n", sc.Type, sc.ID)
 		}
 
 		openAICalls = append(openAICalls, openai.ToolCall{
@@ -242,20 +241,19 @@ func convertSchemaStreamToolCallsToOpenAI(schemaCalls []schema.ToolCall) []opena
 
 	openAICalls := make([]openai.ToolCall, 0, len(schemaCalls))
 	for _, sc := range schemaCalls {
-		// 创建本地变量存储索引
 		var localIndex int
 		if sc.Index != nil {
 			localIndex = *sc.Index
+		} else {
+			// 如果 Index 为 nil，可能需要设置一个默认值或根据上下文决定
+			// 对于流式响应，通常需要索引，这里暂时设为 0，可能需要调整
+			localIndex = 0
+			fmt.Printf("Warning: Stream tool call index is nil for ID %s, defaulting to 0\n", sc.ID)
 		}
 
-		// 打印结构体帮助调试
-		fmt.Printf("Debug - Stream tool call ID: %s, Type: %s, Index: %v\n",
-			sc.ID, sc.Type, sc.Index)
-
-		// 默认使用 function 类型，Eino 中默认也是 "function"
 		toolType := openai.ToolTypeFunction
 		if sc.Type != "function" {
-			fmt.Printf("警告: 未知的工具类型 '%s'，默认使用 'function'\n", sc.Type)
+			fmt.Printf("Warning: Unknown stream tool type '%s' for ToolCall ID %s, defaulting to 'function'\n", sc.Type, sc.ID)
 		}
 
 		openAICalls = append(openAICalls, openai.ToolCall{
@@ -310,18 +308,18 @@ func AzureCreateChatCompletion(req ChatRequest) (*openai.ChatCompletionResponse,
 
 		if len(schemaTools) > 0 {
 			// 根据toolChoice决定是否使用强制工具绑定
-			if req.ChatCompletionRequest.ToolChoice == "required" || req.ChatCompletionRequest.ToolChoice == "force" {
+			toolChoiceStr := fmt.Sprintf("%v", req.ChatCompletionRequest.ToolChoice) // 确保是字符串
+			if strings.ToLower(toolChoiceStr) == "required" || strings.ToLower(toolChoiceStr) == "force" {
 				err = chatModel.BindForcedTools(schemaTools) // 使用强制工具绑定
 				if err != nil {
 					return nil, fmt.Errorf("强制绑定工具失败: %w", err)
 				}
 			} else {
-				err = chatModel.BindTools(schemaTools) // 使用常规工具绑定
+				err = chatModel.BindTools(schemaTools) // 使用常规工具绑定 (auto or specific tool)
 				if err != nil {
 					return nil, fmt.Errorf("绑定工具失败: %w", err)
 				}
 			}
-			fmt.Printf("已绑定 %d 个工具到模型\n", len(schemaTools))
 		}
 	}
 	// --- 工具绑定逻辑结束 ---
@@ -335,7 +333,6 @@ func AzureCreateChatCompletion(req ChatRequest) (*openai.ChatCompletionResponse,
 		// 尝试解析 Azure 特定的错误信息
 		var apiError *openai.APIError
 		if errors.As(err, &apiError) {
-			// 这里可以记录更详细的 Azure 错误信息
 			return nil, fmt.Errorf("调用Generate方法失败 (Azure API Error: Status=%d Type=%s Code=%v Param=%v): %w",
 				apiError.HTTPStatusCode, apiError.Type, apiError.Code, apiError.Param, err)
 		}
@@ -343,7 +340,6 @@ func AzureCreateChatCompletion(req ChatRequest) (*openai.ChatCompletionResponse,
 	}
 
 	// --- 处理工具调用响应 ---
-	// eino/schema.Message 可能包含 ToolCalls 信息
 	choices := []openai.ChatCompletionChoice{
 		{
 			Index: 0,
@@ -369,17 +365,20 @@ func AzureCreateChatCompletion(req ChatRequest) (*openai.ChatCompletionResponse,
 			CompletionTokens: resp.ResponseMeta.Usage.CompletionTokens,
 			TotalTokens:      resp.ResponseMeta.Usage.TotalTokens,
 		}
+	} else {
+		fmt.Println("Info: No usage info found in response meta")
 	}
 
 	// 构造并返回响应
-	return &openai.ChatCompletionResponse{
+	finalResp := &openai.ChatCompletionResponse{
 		ID:      uniqueID,
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model, // 使用请求中的模型名称
 		Choices: choices,   // 使用上面构造的 choices
 		Usage:   usage,
-	}, nil
+	}
+	return finalResp, nil
 }
 
 // 检查消息中是否包含工具消息
@@ -400,18 +399,16 @@ func AzureCreateChatCompletionToChat(req ChatRequest) (*openai.ChatCompletionRes
 	// 准备请求参数
 	model := req.Model
 	if model == "" {
-		// 如果没有指定模型，可以设置一个默认值或返回错误
 		return nil, fmt.Errorf("未指定模型名称")
 	}
 
 	// 调用Azure服务 (现在会处理工具调用)
 	resp, err := AzureCreateChatCompletion(req)
 	if err != nil {
-		// 错误信息已在 AzureCreateChatCompletion 中格式化
+		// 错误信息已在 AzureCreateChatCompletion 中格式化和记录
 		return nil, fmt.Errorf("调用Azure聊天接口失败: %w", err)
 	}
 
-	// 直接返回从 AzureCreateChatCompletion 获取的响应
 	return resp, nil
 }
 
@@ -444,7 +441,8 @@ func AzureStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.Ch
 	}
 
 	// --- 添加工具绑定逻辑 ---
-	if len(req.ChatCompletionRequest.Tools) > 0 {
+	hasTools := len(req.ChatCompletionRequest.Tools) > 0
+	if hasTools {
 		schemaTools, err := convertOpenAIToolsToSchemaTools(req.ChatCompletionRequest.Tools)
 		if err != nil {
 			return nil, fmt.Errorf("转换工具定义失败: %w", err)
@@ -454,7 +452,6 @@ func AzureStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.Ch
 			if err != nil {
 				return nil, fmt.Errorf("绑定工具失败: %w", err)
 			}
-			// 同样，tool_choice 的处理可能需要在 Stream 方法的选项中进行
 		}
 	}
 	// --- 工具绑定逻辑结束 ---
@@ -463,7 +460,6 @@ func AzureStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.Ch
 	schemaMessages := convertChatRequestToSchemaMessages(req)
 
 	// 调用Stream方法获取流式响应
-	// 注意：如果 einoopenai 需要通过选项传递 tool_choice，需要在这里修改
 	streamReader, err := chatModel.Stream(ctx, schemaMessages)
 	if err != nil {
 		return nil, fmt.Errorf("调用Stream方法失败: %v", err)
@@ -476,7 +472,7 @@ func AzureStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.Ch
 	go func() {
 		defer func() {
 			if panicErr := recover(); panicErr != nil {
-				fmt.Printf("Azure Stream处理发生异常: %v\n", panicErr)
+				fmt.Printf("Panic recovered in stream processing goroutine: %v\n", panicErr)
 			}
 			streamReader.Close()
 			resultWriter.Close()
@@ -490,11 +486,9 @@ func AzureStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.Ch
 			// 从流中接收消息
 			message, err := streamReader.Recv()
 			if errors.Is(err, io.EOF) {
-				// 流结束
-				break
+				break // 流结束
 			}
 			if err != nil {
-				// 处理错误
 				_ = resultWriter.Send(nil, fmt.Errorf("从Azure接收流数据失败: %v", err))
 				return
 			}
@@ -517,12 +511,13 @@ func AzureStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.Ch
 						FinishReason: "", // 在最后一条消息中设置
 					},
 				},
+				// 流式响应通常不包含 Usage
 			}
 
-			// 如果是最后一条消息，设置完成原因
-			// 注意：完成原因可能与工具调用一起出现在 delta 中，或在 stream 结束时
+			// 处理 FinishReason
 			if message.ResponseMeta != nil && message.ResponseMeta.FinishReason != "" {
-				streamResp.Choices[0].FinishReason = openai.FinishReason(message.ResponseMeta.FinishReason)
+				finishReason := openai.FinishReason(message.ResponseMeta.FinishReason)
+				streamResp.Choices[0].FinishReason = finishReason
 			}
 
 			// 发送流式响应
@@ -547,6 +542,7 @@ func AzureStreamChatCompletionToChat(req ChatRequest, writer io.Writer) error {
 	}
 
 	// 处理流式响应
+	chunkCount := 0
 	for {
 		response, err := streamReader.Recv() // response 是 *openai.ChatCompletionStreamResponse
 		if errors.Is(err, io.EOF) {
@@ -554,15 +550,15 @@ func AzureStreamChatCompletionToChat(req ChatRequest, writer io.Writer) error {
 		}
 		if err != nil {
 			// 将错误写入流中，如果 writer 支持的话，或者直接返回错误
-			// errorMsg := fmt.Sprintf(`{"error": {"message": "%s", "type": "stream_error"}}`, err.Error())
-			// _, _ = writer.Write([]byte("data: " + errorMsg + "\n\n"))
 			return fmt.Errorf("接收Azure流式响应失败: %w", err)
 		}
 
 		// response 已经是 *openai.ChatCompletionStreamResponse 类型，直接序列化
-		if response == nil { // 添加 nil 检查
+		if response == nil {
+			fmt.Println("Info: Received nil response from streamReader, skipping.")
 			continue
 		}
+		chunkCount++
 
 		// 将响应写入writer
 		data, err := json.Marshal(response)
@@ -570,7 +566,6 @@ func AzureStreamChatCompletionToChat(req ChatRequest, writer io.Writer) error {
 			// 记录错误，但尝试继续处理流
 			fmt.Printf("序列化流式响应失败: %v\n", err)
 			continue
-			// return fmt.Errorf("序列化流式响应失败: %w", err)
 		}
 
 		// 添加data:前缀
