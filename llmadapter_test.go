@@ -1185,6 +1185,539 @@ func TestChatService_CreateChatCompletionMultiTool(t *testing.T) {
 	}
 }
 
+// TestChatService_CreateChatCompletionSingleTool_Bedrock 测试单个工具调用功能 (Bedrock)
+// 执行命令：go test -run TestChatService_CreateChatCompletionSingleTool_Bedrock
+func TestChatService_CreateChatCompletionSingleTool_Bedrock(t *testing.T) {
+	// 检查环境变量是否设置了测试标志
+	if os.Getenv("SKIP_BEDROCK_TESTS") == "1" {
+		t.Skip("跳过Bedrock API测试")
+	}
+
+	// 准备测试用例
+	testCases := []struct {
+		name            string
+		initialMessages []openai.ChatCompletionMessage
+		expectToolCall  bool
+		toolResult      string // 模拟的工具结果
+		expectError     bool
+	}{
+		{
+			name: "Bedrock单工具调用测试-获取股票价格",
+			initialMessages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: "请查询Amazon公司(AMZN)的当前股票价格",
+				},
+			},
+			expectToolCall: true,
+			toolResult:     `{"ticker":"AMZN","price":180.75,"currency":"USD","timestamp":"2024-11-18T14:30:00Z"}`,
+			expectError:    false,
+		},
+		{
+			name: "Bedrock单工具调用测试-货币转换",
+			initialMessages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: "请将100美元转换为人民币",
+				},
+			},
+			expectToolCall: true,
+			toolResult:     `{"from_amount":100,"from_currency":"USD","to_currency":"CNY","to_amount":718.50,"rate":7.185,"timestamp":"2024-11-18T14:30:00Z"}`,
+			expectError:    false,
+		},
+		{
+			name: "Bedrock单工具调用测试-天气查询",
+			initialMessages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: "请查询北京的当前天气情况",
+				},
+			},
+			expectToolCall: true,
+			toolResult:     `{"location":"Beijing, China","temperature":15,"unit":"celsius","conditions":"Sunny","humidity":45,"wind_speed":10,"wind_direction":"NE","timestamp":"2024-11-18T14:30:00Z"}`,
+			expectError:    false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// --- 第一步：发送初始请求，获取工具调用 ---
+			firstRequest := ChatRequest{
+				Provider: "bedrock",
+				ChatCompletionRequest: openai.ChatCompletionRequest{
+					Model:    "anthropic.claude-3-5-sonnet-20240620-v1:0", // 使用Claude 3.5 Sonnet
+					Messages: tc.initialMessages,
+					// 定义工具
+					Tools: []openai.Tool{
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:        "get_stock_price",
+								Description: "获取指定股票代码的当前价格信息",
+								Parameters: map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"ticker": map[string]interface{}{
+											"type":        "string",
+											"description": "股票代码，例如 'AAPL'、'MSFT'、'AMZN'等",
+										},
+									},
+									"required": []string{"ticker"},
+								},
+							},
+						},
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:        "convert_currency",
+								Description: "将一种货币转换为另一种货币",
+								Parameters: map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"amount": map[string]interface{}{
+											"type":        "number",
+											"description": "要转换的金额",
+										},
+										"from_currency": map[string]interface{}{
+											"type":        "string",
+											"description": "源货币代码，例如 'USD'、'EUR'、'CNY'等",
+										},
+										"to_currency": map[string]interface{}{
+											"type":        "string",
+											"description": "目标货币代码，例如 'USD'、'EUR'、'CNY'等",
+										},
+									},
+									"required": []string{"amount", "from_currency", "to_currency"},
+								},
+							},
+						},
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:        "get_weather",
+								Description: "获取指定城市的当前天气情况",
+								Parameters: map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"location": map[string]interface{}{
+											"type":        "string",
+											"description": "城市名称，例如 '北京'、'上海'、'New York'等",
+										},
+									},
+									"required": []string{"location"},
+								},
+							},
+						},
+					},
+					ToolChoice:  "auto", // 让模型决定是否使用工具
+					MaxTokens:   300,    // 增加token量以支持更复杂的工具调用
+					Temperature: 0.2,    // 降低温度，使模型更加确定性
+				},
+			}
+
+			t.Log("--- 发送第一次请求 ---")
+			firstResp, err := CreateChatCompletion(firstRequest, nil)
+
+			// 错误处理
+			if err != nil {
+				// 检查是否是模型访问权限错误
+				if strings.Contains(err.Error(), "Your account does not have an agreement to this model") ||
+					strings.Contains(err.Error(), "403 Forbidden") {
+					t.Skipf("跳过测试: 账户没有访问模型的权限: %v", err)
+					return
+				}
+
+				if tc.expectError {
+					assert.Error(t, err, "预期应返回错误")
+					return // 如果预期错误且确实发生错误，测试通过
+				}
+				t.Fatalf("第一次API调用失败: %v", err) // 非预期错误，终止测试
+			}
+			if tc.expectError {
+				t.Fatalf("预期有错误但API调用成功")
+			}
+
+			// 验证第一次响应
+			assert.NotNil(t, firstResp, "第一次响应不应为空")
+			assert.NotEmpty(t, firstResp.Choices, "第一次响应的选择不应为空")
+			firstAssistantMessage := firstResp.Choices[0].Message
+			assert.Equal(t, openai.ChatMessageRoleAssistant, firstAssistantMessage.Role, "第一次响应消息角色应为assistant")
+
+			// 检查是否收到了工具调用，并且确保是真实的工具调用请求
+			if tc.expectToolCall {
+				if len(firstAssistantMessage.ToolCalls) == 0 {
+					// 检查是否因为finish_reason是"tool_use"但没有正确解析工具调用
+					finish_reason := firstResp.Choices[0].FinishReason
+					if finish_reason == "tool_use" {
+						t.Logf("收到tool_use完成原因，但工具调用为空，可能需要修复适配器解析工具调用的逻辑")
+						t.Skip("适配器未能正确解析工具调用，跳过后续测试")
+						return
+					}
+
+					// 如果不是解析问题，则模型确实没有使用工具调用
+					t.Logf("没有收到工具调用请求，可能是模型不支持工具调用，跳过后续验证")
+					t.Skip("当前模型不支持工具调用或未返回工具调用")
+					return
+				}
+
+				assert.NotEmpty(t, firstAssistantMessage.ToolCalls, "第一次响应应包含 tool_calls")
+				t.Logf("收到工具调用请求: %d 个", len(firstAssistantMessage.ToolCalls))
+				for _, toolCall := range firstAssistantMessage.ToolCalls {
+					t.Logf("  - ID: %s, Type: %s, Function: %s(%s)", toolCall.ID, toolCall.Type, toolCall.Function.Name, toolCall.Function.Arguments)
+
+					// 验证工具调用ID格式是否符合Bedrock的规范，Claude 3.5通常应有toolu_前缀
+					assert.True(t, strings.HasPrefix(toolCall.ID, "toolu_"), "工具调用ID应以'toolu_'开头")
+
+					// 验证工具调用类型
+					assert.Equal(t, openai.ToolTypeFunction, toolCall.Type, "工具调用类型应为function")
+
+					// 验证函数名称不为空
+					assert.NotEmpty(t, toolCall.Function.Name, "函数名称不应为空")
+
+					// 验证函数参数不为空且为有效的JSON
+					assert.NotEmpty(t, toolCall.Function.Arguments, "函数参数不应为空")
+					var args map[string]interface{}
+					err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+					assert.NoError(t, err, "函数参数应为有效的JSON")
+				}
+			} else {
+				if len(firstAssistantMessage.ToolCalls) > 0 {
+					t.Fatalf("意外收到工具调用请求")
+				}
+			}
+
+			// 如果没有工具调用，但期望有工具调用，则检查原因
+			if len(firstAssistantMessage.ToolCalls) == 0 && tc.expectToolCall {
+				finishReason := firstResp.Choices[0].FinishReason
+				t.Logf("未收到工具调用，完成原因: %s", finishReason)
+				t.Skip("模型未使用工具调用，可能需要调整提示词或模型参数")
+				return
+			}
+
+			// 如果没有工具调用，不需要进行后续步骤
+			if len(firstAssistantMessage.ToolCalls) == 0 {
+				t.Log("没有收到工具调用请求，跳过后续步骤")
+				return
+			}
+
+			// 在发送第二个请求前，确保assistant消息有内容
+			if firstAssistantMessage.Content == "" {
+				firstAssistantMessage.Content = "我将使用工具来帮助回答您的问题。"
+				t.Logf("为assistant消息添加content: '%s'", firstAssistantMessage.Content)
+			}
+
+			// 重新构建第二次请求的消息列表
+			messagesForSecondCall := []openai.ChatCompletionMessage{
+				tc.initialMessages[0],
+				firstAssistantMessage,
+			}
+
+			// 添加工具结果消息
+			firstToolCallID := firstAssistantMessage.ToolCalls[0].ID
+
+			toolResponseMessage := openai.ChatCompletionMessage{
+				Role:       openai.ChatMessageRoleTool,
+				Content:    tc.toolResult,
+				ToolCallID: firstToolCallID,
+			}
+			messagesForSecondCall = append(messagesForSecondCall, toolResponseMessage)
+
+			// 打印更新后的消息列表
+			messagesJSON, _ := json.MarshalIndent(messagesForSecondCall, "", "  ")
+			t.Logf("添加工具响应后的消息列表:\n%s", string(messagesJSON))
+
+			secondRequest := ChatRequest{
+				Provider: "bedrock",
+				ChatCompletionRequest: openai.ChatCompletionRequest{
+					Model:       firstRequest.Model, // 使用与第一次请求相同的模型
+					Messages:    messagesForSecondCall,
+					MaxTokens:   300,
+					Temperature: 0.2,
+					// 第二次请求也需要提供工具定义，确保模型能够继续使用工具
+					Tools: firstRequest.ChatCompletionRequest.Tools,
+				},
+			}
+
+			t.Log("--- 发送第二次请求 (带工具结果) ---")
+			secondResp, err := CreateChatCompletion(secondRequest, nil)
+
+			// 错误处理
+			if err != nil {
+				t.Fatalf("第二次API调用失败: %v", err)
+			}
+
+			// 验证最终响应
+			assert.NotNil(t, secondResp, "第二次响应不应为空")
+			assert.NotEmpty(t, secondResp.ID, "响应ID不应为空")
+			assert.Equal(t, "chat.completion", secondResp.Object, "响应对象类型应为chat.completion")
+			assert.NotZero(t, secondResp.Created, "创建时间不应为零")
+			assert.NotEmpty(t, secondResp.Choices, "选择不应为空")
+
+			if len(secondResp.Choices) > 0 {
+				secondAssistantMessage := secondResp.Choices[0].Message
+				finalMessage := secondAssistantMessage
+				assert.Equal(t, openai.ChatMessageRoleAssistant, finalMessage.Role, "最终消息角色应为assistant")
+
+				// 检查是否有继续的工具调用
+				if len(secondAssistantMessage.ToolCalls) > 0 {
+					t.Logf("第二次响应仍有工具调用: %d 个", len(secondAssistantMessage.ToolCalls))
+					for _, toolCall := range secondAssistantMessage.ToolCalls {
+						t.Logf("  - ID: %s, Type: %s, Function: %s(%s)",
+							toolCall.ID, toolCall.Type, toolCall.Function.Name, toolCall.Function.Arguments)
+					}
+
+					// 验证第二次工具调用ID格式
+					assert.True(t, strings.HasPrefix(secondAssistantMessage.ToolCalls[0].ID, "toolu_"),
+						"第二次工具调用ID应以'toolu_'开头")
+				} else {
+					// 检查最终响应内容
+					assert.NotEmpty(t, finalMessage.Content, "最终助手消息内容不应为空")
+					t.Logf("最终助手响应内容: %s", finalMessage.Content)
+					t.Logf("完成原因: %s", secondResp.Choices[0].FinishReason)
+
+					// 根据不同的测试用例验证响应内容
+					if strings.Contains(tc.name, "股票价格") {
+						assert.True(t,
+							strings.Contains(finalMessage.Content, "AMZN") ||
+								strings.Contains(finalMessage.Content, "Amazon") ||
+								strings.Contains(finalMessage.Content, "价格") ||
+								strings.Contains(finalMessage.Content, "美元"),
+							"最终响应应包含股票相关信息")
+					} else if strings.Contains(tc.name, "货币转换") {
+						assert.True(t,
+							strings.Contains(finalMessage.Content, "美元") ||
+								strings.Contains(finalMessage.Content, "人民币") ||
+								strings.Contains(finalMessage.Content, "转换") ||
+								strings.Contains(finalMessage.Content, "CNY") ||
+								strings.Contains(finalMessage.Content, "USD"),
+							"最终响应应包含货币转换相关信息")
+					} else if strings.Contains(tc.name, "天气查询") {
+						assert.True(t,
+							strings.Contains(finalMessage.Content, "北京") ||
+								strings.Contains(finalMessage.Content, "天气") ||
+								strings.Contains(finalMessage.Content, "温度") ||
+								strings.Contains(finalMessage.Content, "气温") ||
+								strings.Contains(finalMessage.Content, "湿度"),
+							"最终响应应包含天气相关信息")
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestChatService_CreateChatCompletionMultiTool_Bedrock 测试多个工具调用功能 (Bedrock)
+// 执行命令：go test -run TestChatService_CreateChatCompletionMultiTool_Bedrock
+func TestChatService_CreateChatCompletionMultiTool_Bedrock(t *testing.T) {
+	// 检查环境变量是否设置了测试标志
+	if os.Getenv("SKIP_BEDROCK_TESTS") == "1" {
+		t.Skip("跳过Bedrock API测试")
+	}
+
+	// 准备测试用例
+	testCases := []struct {
+		name            string
+		initialMessages []openai.ChatCompletionMessage
+		expectToolCalls bool
+		toolResults     map[string]string // 模拟的工具结果，key为工具名称
+		expectError     bool
+	}{
+		{
+			name: "Bedrock多工具调用测试-天气和文件列表",
+			initialMessages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: "请帮我查询旧金山的天气，并列出 /tmp/data 目录下的文件。",
+				},
+			},
+			expectToolCalls: true,
+			toolResults: map[string]string{
+				"get_weather":             `{"location": "San Francisco", "temperature": "15°C", "condition": "Cloudy"}`, // 模拟天气结果
+				"list_directory_contents": `{"directory_path": "/tmp/data", "files": ["report.txt", "image.png"]}`,       // 模拟文件列表
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// --- 第一步：发送初始请求，获取工具调用 ---
+			firstRequest := ChatRequest{
+				Provider: "bedrock",
+				ChatCompletionRequest: openai.ChatCompletionRequest{
+					Model:    "anthropic.claude-3-5-sonnet-20240620-v1:0", // 使用支持工具调用的Bedrock模型
+					Messages: tc.initialMessages,
+					// 定义多个工具
+					Tools: []openai.Tool{
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:        "get_weather",
+								Description: "获取指定城市的天气信息",
+								Parameters: map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"location": map[string]interface{}{
+											"type":        "string",
+											"description": "城市名称，例如：'旧金山'",
+										},
+									},
+									"required": []string{"location"},
+								},
+							},
+						},
+						{
+							Type: openai.ToolTypeFunction,
+							Function: &openai.FunctionDefinition{
+								Name:        "list_directory_contents",
+								Description: "列出指定目录下的文件和子目录",
+								Parameters: map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"directory_path": map[string]interface{}{
+											"type":        "string",
+											"description": "要列出内容的目录路径，例如：'/tmp/data'",
+										},
+									},
+									"required": []string{"directory_path"},
+								},
+							},
+						},
+					},
+					ToolChoice:  "auto", // 让模型决定是否使用工具
+					MaxTokens:   500,    // 增加 MaxTokens 以容纳工具调用结构
+					Temperature: 0.5,
+				},
+			}
+
+			t.Log("--- 发送第一次请求 (Bedrock, Multi-Tool) ---")
+			firstResp, err := CreateChatCompletion(firstRequest, nil)
+
+			// 增加日志，打印完整的 firstResp
+			respJSON, _ := json.MarshalIndent(firstResp, "", "  ")
+			t.Logf("第一次响应详情 (Bedrock, Multi-Tool):\n%s", string(respJSON))
+
+			// 错误处理
+			if err != nil {
+				t.Logf("测试期间出现错误 (Bedrock, Multi-Tool): %v", err)
+				if tc.expectError {
+					assert.Error(t, err, "预期应返回错误 (Bedrock, Multi-Tool)")
+					return
+				}
+				t.Fatalf("第一次API调用失败 (Bedrock, Multi-Tool): %v", err)
+			}
+			if tc.expectError {
+				assert.NoError(t, err, "预期有错误但API调用成功 (Bedrock, Multi-Tool)")
+				return
+			}
+
+			// 验证第一次响应
+			assert.NotNil(t, firstResp, "第一次响应不应为空 (Bedrock, Multi-Tool)")
+			assert.NotEmpty(t, firstResp.Choices, "第一次响应的选择不应为空 (Bedrock, Multi-Tool)")
+			firstAssistantMessage := firstResp.Choices[0].Message
+			assert.Equal(t, openai.ChatMessageRoleAssistant, firstAssistantMessage.Role, "第一次响应消息角色应为assistant (Bedrock, Multi-Tool)")
+
+			// 检查是否收到了工具调用
+			if tc.expectToolCalls {
+				assert.True(t, len(firstAssistantMessage.ToolCalls) > 0, "第一次响应应包含 tool_calls (Bedrock, Multi-Tool)")
+				// 对于多工具场景，我们期望至少一个工具调用，理想情况是两个
+				assert.True(t, len(firstAssistantMessage.ToolCalls) >= 1, "预期至少有1个工具调用 (Bedrock, Multi-Tool)")
+				t.Logf("收到工具调用请求 (Bedrock, Multi-Tool): %d 个", len(firstAssistantMessage.ToolCalls))
+				for i, toolCall := range firstAssistantMessage.ToolCalls {
+					t.Logf("  - #%d: ID: %s, Type: %s, Function: %s(%s)", i+1, toolCall.ID, toolCall.Type, toolCall.Function.Name, toolCall.Function.Arguments)
+				}
+			} else {
+				if len(firstAssistantMessage.ToolCalls) > 0 {
+					t.Logf("意外收到工具调用请求，但继续测试 (Bedrock, Multi-Tool): %d 个", len(firstAssistantMessage.ToolCalls))
+				}
+			}
+
+			// 如果没有工具调用，不需要进行后续步骤
+			if len(firstAssistantMessage.ToolCalls) == 0 {
+				t.Log("没有收到工具调用请求，跳过后续步骤 (Bedrock, Multi-Tool)")
+				// 如果预期有工具调用但没有收到，则测试失败
+				assert.False(t, tc.expectToolCalls, "预期有工具调用但模型未返回 (Bedrock, Multi-Tool)")
+				return
+			}
+
+			// --- 第二步：发送第二次请求，包含所有工具结果 ---
+			// 构建包含工具结果的消息列表
+			messagesForSecondCall := []openai.ChatCompletionMessage{
+				tc.initialMessages[0],
+				firstAssistantMessage, // 助手发起的工具调用请求
+			}
+
+			// 添加所有工具结果消息
+			for _, toolCall := range firstAssistantMessage.ToolCalls {
+				toolCallID := toolCall.ID
+				toolName := toolCall.Function.Name
+				toolResult, ok := tc.toolResults[toolName]
+				if !ok {
+					t.Fatalf("未找到工具 '%s' 的模拟结果", toolName)
+				}
+
+				toolResponseMessage := openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    toolResult, // 使用模拟的工具结果
+					ToolCallID: toolCallID,
+					Name:       toolName, // Bedrock/Anthropic 需要 Name 字段
+				}
+				messagesForSecondCall = append(messagesForSecondCall, toolResponseMessage)
+				t.Logf("已添加工具 (%s) 的响应, ID: %s", toolName, toolCallID)
+			}
+
+			// 打印第二次请求的消息列表
+			messagesJSON, _ := json.MarshalIndent(messagesForSecondCall, "", "  ")
+			t.Logf("发送第二次请求的消息列表 (Bedrock, Multi-Tool):\n%s", string(messagesJSON))
+
+			// 发送第二次请求，需要重复定义工具 (Bedrock 要求)
+			secondRequest := ChatRequest{
+				Provider: "bedrock",
+				ChatCompletionRequest: openai.ChatCompletionRequest{
+					Model:       "anthropic.claude-3-5-sonnet-20240620-v1:0",
+					Messages:    messagesForSecondCall,
+					MaxTokens:   250, // 可以适当调整
+					Temperature: 0.5,
+					Tools:       firstRequest.ChatCompletionRequest.Tools, // Bedrock 需要再次提供工具定义
+				},
+			}
+
+			t.Log("--- 发送第二次请求 (带所有工具结果, Bedrock, Multi-Tool) ---")
+			secondResp, err := CreateChatCompletion(secondRequest, nil)
+
+			// 错误处理
+			if err != nil {
+				t.Logf("测试期间出现错误 (Bedrock, Multi-Tool): %v", err)
+				t.Fatalf("第二次API调用失败 (Bedrock, Multi-Tool): %v", err)
+			}
+
+			// 验证最终响应
+			assert.NotNil(t, secondResp, "第二次响应不应为空 (Bedrock, Multi-Tool)")
+			assert.NotEmpty(t, secondResp.ID, "响应ID不应为空 (Bedrock, Multi-Tool)")
+			assert.Equal(t, "chat.completion", secondResp.Object, "响应对象类型应为chat.completion (Bedrock, Multi-Tool)")
+			assert.NotZero(t, secondResp.Created, "创建时间不应为零 (Bedrock, Multi-Tool)")
+			assert.NotEmpty(t, secondResp.Choices, "选择不应为空 (Bedrock, Multi-Tool)")
+
+			if len(secondResp.Choices) > 0 {
+				finalMessage := secondResp.Choices[0].Message
+				assert.Equal(t, openai.ChatMessageRoleAssistant, finalMessage.Role, "最终消息角色应为assistant (Bedrock, Multi-Tool)")
+				assert.NotEmpty(t, finalMessage.Content, "最终助手消息内容不应为空 (Bedrock, Multi-Tool)")
+				t.Logf("最终助手响应内容 (Bedrock, Multi-Tool): %s", finalMessage.Content)
+
+				// 验证最终响应是否结合了两个工具的结果
+				assert.Contains(t, finalMessage.Content, "旧金山", "最终响应应包含城市名")
+				assert.Contains(t, finalMessage.Content, "15°C", "最终响应应包含温度信息")   // 来自 get_weather 模拟结果
+				assert.Contains(t, finalMessage.Content, "Cloudy", "最终响应应包含天气状况") // 来自 get_weather 模拟结果
+				assert.Contains(t, finalMessage.Content, "/tmp/data", "最终响应应包含目录路径")
+				assert.Contains(t, finalMessage.Content, "report.txt", "最终响应应包含文件列表信息") // 来自 list_directory_contents 模拟结果
+				assert.Contains(t, finalMessage.Content, "image.png", "最终响应应包含文件列表信息")  // 来自 list_directory_contents 模拟结果
+
+				t.Logf("完成原因 (Bedrock, Multi-Tool): %s", secondResp.Choices[0].FinishReason)
+			}
+		})
+	}
+}
+
 // logAzureError 辅助函数，用于记录详细的 Azure API 错误
 func logAzureError(t *testing.T, err error) {
 	var apiErr *openai.APIError

@@ -9,7 +9,9 @@ require (
 	github.com/cloudwego/eino-ext/components/model/gemini v0.0.0-20250314110024-9e89ba18146c
 	github.com/cloudwego/eino-ext/components/model/openai v0.0.0-20250313134112-733801b1255f
 	github.com/cloudwego/eino-ext/libs/acl/openai v0.0.0-20250305023926-469de0301955
+	github.com/getkin/kin-openapi v0.118.0
 	github.com/google/generative-ai-go v0.19.0
+	github.com/sashabaranov/go-openai v1.32.5
 	github.com/stretchr/testify v1.10.0
 	google.golang.org/api v0.189.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -44,7 +46,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/getkin/kin-openapi v0.118.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
@@ -70,7 +71,6 @@ require (
 	github.com/perimeterx/marshmallow v1.1.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/sashabaranov/go-openai v1.32.5 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

@@ -204,6 +204,7 @@ func BedrockCreateChatCompletionToChat(req ChatRequest) (*openai.ChatCompletionR
 		// 如果没有指定模型，可以设置一个默认值或返回错误
 		return nil, fmt.Errorf("未指定模型名称")
 	}
+
 	// 创建Bedrock配置
 	temperature := float32(req.Temperature)
 	topP := float32(req.TopP)
@@ -264,8 +265,32 @@ func BedrockCreateChatCompletionToChat(req ChatRequest) (*openai.ChatCompletionR
 				Role:    string(resp.Role),
 				Content: resp.Content,
 			},
-			FinishReason: openai.FinishReason(resp.ResponseMeta.FinishReason), // 默认值，实际应根据响应确定
+			FinishReason: openai.FinishReason(resp.ResponseMeta.FinishReason),
 		},
+	}
+
+	// 处理工具调用，将Bedrock的工具调用映射到OpenAI格式
+	if resp.ToolCalls != nil && len(resp.ToolCalls) > 0 {
+		// 创建OpenAI格式的工具调用数组
+		openaiToolCalls := make([]openai.ToolCall, 0, len(resp.ToolCalls))
+
+		for _, toolCall := range resp.ToolCalls {
+			// 将Bedrock工具调用转换为OpenAI格式
+			openaiToolCall := openai.ToolCall{
+				ID:   toolCall.ID,
+				Type: openai.ToolTypeFunction, // Bedrock目前只支持函数调用类型
+				Function: openai.FunctionCall{
+					Name:      toolCall.Function.Name,
+					Arguments: toolCall.Function.Arguments,
+				},
+			}
+
+			// 添加到数组
+			openaiToolCalls = append(openaiToolCalls, openaiToolCall)
+		}
+
+		// 将工具调用设置到Message中
+		choices[0].Message.ToolCalls = openaiToolCalls
 	}
 
 	// 生成唯一ID
@@ -282,14 +307,16 @@ func BedrockCreateChatCompletionToChat(req ChatRequest) (*openai.ChatCompletionR
 	}
 
 	// 构造并返回响应
-	return &openai.ChatCompletionResponse{
+	result := &openai.ChatCompletionResponse{
 		ID:      uniqueID,
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
 		Choices: choices,
 		Usage:   usage,
-	}, nil
+	}
+
+	return result, nil
 }
 
 // BedrockStreamChatCompletion 使用AWS Bedrock服务创建流式聊天完成
@@ -382,9 +409,8 @@ func BedrockStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.
 					{
 						Index: 0,
 						Delta: openai.ChatCompletionStreamChoiceDelta{
-							Role:      string(message.Role),
-							Content:   message.Content,
-							ToolCalls: convertToolCalls(message.ToolCalls),
+							Role:    string(message.Role),
+							Content: message.Content,
 						},
 						FinishReason: "",
 					},
@@ -405,23 +431,6 @@ func BedrockStreamChatCompletion(req ChatRequest) (*schema.StreamReader[*openai.
 	}()
 
 	return resultReader, nil
-}
-
-// 添加convertToolCalls函数
-func convertToolCalls(toolCalls []schema.ToolCall) []openai.ToolCall {
-	converted := make([]openai.ToolCall, len(toolCalls))
-	for i, tc := range toolCalls {
-		converted[i] = openai.ToolCall{
-			Index: tc.Index,
-			ID:    tc.ID,
-			Type:  openai.ToolType(tc.Type),
-			Function: openai.FunctionCall{
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-			},
-		}
-	}
-	return converted
 }
 
 // BedrockStreamChatCompletionToChat 使用AWS Bedrock服务创建流式聊天完成并转换为聊天流格式
@@ -516,7 +525,6 @@ func convertToolInfos(reqTools []openai.Tool) ([]*schema.ToolInfo, error) {
 	for _, tool := range reqTools {
 		// 检查工具名称是否已存在，如果存在则跳过
 		if _, exists := toolNameMap[tool.Function.Name]; exists {
-			fmt.Printf("跳过重复的工具名称: %s\n", tool.Function.Name)
 			continue
 		}
 
@@ -556,9 +564,13 @@ func convertToolInfos(reqTools []openai.Tool) ([]*schema.ToolInfo, error) {
 
 			// 处理type字段
 			if typeVal, exists := propMap["type"]; exists {
-				openapi3schema.Type = fmt.Sprintf("%v", typeVal)
+				if typeStr, ok := typeVal.(string); ok {
+					openapi3schema.Type = typeStr
+				} else {
+					openapi3schema.Type = "string"
+				}
 			} else {
-				openapi3schema.Type = "string" // 默认类型
+				openapi3schema.Type = "string"
 			}
 
 			// 处理title字段
@@ -581,15 +593,21 @@ func convertToolInfos(reqTools []openai.Tool) ([]*schema.ToolInfo, error) {
 			}
 		}
 
-		tools = append(tools, &schema.ToolInfo{
+		// 获取必需字段
+		requiredFields := getRequiredFields(paramsObj)
+
+		// 创建工具信息
+		toolInfo := &schema.ToolInfo{
 			Name: tool.Function.Name,
 			Desc: tool.Function.Description,
 			ParamsOneOf: schema.NewParamsOneOfByOpenAPIV3(&openapi3.Schema{
-				Type:       "object",
+				Type:       openapi3.TypeObject,
 				Properties: toolProperties,
-				Required:   getRequiredFields(paramsObj),
+				Required:   requiredFields,
 			}),
-		})
+		}
+
+		tools = append(tools, toolInfo)
 	}
 
 	return tools, nil
